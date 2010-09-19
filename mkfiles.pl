@@ -225,7 +225,7 @@ sub mfval($) {
     # Returns true if the argument is a known makefile type. Otherwise,
     # prints a warning and returns false;
     if (grep { $type eq $_ }
-	("vc","vcproj","cygwin","borland","lcc","devcppproj","gtk","unix",
+	("vc","vcproj","vcproj11","cygwin","borland","lcc","devcppproj","gtk","unix",
 	 "ac","mpw","osx",)) {
 	    return 1;
 	}
@@ -926,6 +926,232 @@ if (defined $makefiles{'vcproj'}) {
     	"# End Target\r\n".
     	"# End Project\r\n";
     	select STDOUT; close OUT;
+    	chdir "..";
+    }
+}
+
+if (defined $makefiles{'vcproj11'}) {
+    $dirpfx = &dirpfx($makefiles{'vcproj11'}, "\\");
+
+    $orig_dir = cwd;
+    
+    # XXX Win32API::GUID works only on windows, maybe use Data::GUID ?
+    use APR::UUID;
+    sub make_guid () {
+      return uc APR::UUID->new->format;
+    }
+    
+    ##-- MSVC 2010 Solution and projects
+    #
+    # Note: All files created in this section are written in binary
+    # mode, because although MSVC's command-line make can deal with
+    # LF-only line endings, MSVC project files really _need_ to be
+    # CRLF. Hence, in order for mkfiles.pl to generate usable project
+    # files even when run from Unix, I make sure all files are binary
+    # and explicitly write the CRLFs.
+    #
+    # Create directories if necessary
+    mkdir $makefiles{'vcproj11'}
+        if(! -d $makefiles{'vcproj11'});
+    chdir $makefiles{'vcproj11'};
+    @deps = &deps("X.obj", "X.res", $dirpfx, "\\", "vcproj11");
+    %all_object_deps = map {$_->{obj} => $_->{deps}} @deps;
+    # Create the project files
+    # Get names of all Windows projects (GUI and console)
+    my @prognames = &prognames("G:C");
+    foreach $progname (@prognames) {
+      create_vc11_project(\%all_object_deps, $progname);
+    }
+    # Create the workspace file
+    open OUT, ">$project_name.sln"; binmode OUT; select OUT;
+    print
+    "Microsoft Visual Studio Solution File, Format Version 11.00\r\n".
+    "# Visual C++ Express 2010\r\n".
+    "# WARNING: DO NOT EDIT OR DELETE THIS WORKSPACE FILE!\r\n";
+    # List projects
+    
+    foreach $progname (@prognames) {
+      ($windows_project, $type) = split ",", $progname;
+      # 8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942 is project type guid for VC++
+      my $project_id = make_guid();
+      print "Project(\"{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}\") = \"$windows_project\", \"$windows_project\\$windows_project.vcxproj\", \"{$project_id}\"\r\n";
+      print "EndProject\r\n";
+    }
+    print
+    "Global\r\n".
+    "	GlobalSection(SolutionProperties) = preSolution\r\n".
+    "		HideSolutionNode = FALSE\r\n".
+    "	EndGlobalSection\r\n".
+    "EndGlobal\r\n";
+    select STDOUT; close OUT;
+    chdir $orig_dir;
+
+    sub create_vc11_project {
+    	my ($all_object_deps, $progname) = @_;
+    	# Construct program's dependency info
+    	%seen_objects = ();
+    	%lib_files = ();
+    	%source_files = ();
+    	%header_files = ();
+    	%resource_files = ();
+    	@object_files = split " ", &objects($progname, "X.obj", "X.res", "X.lib");
+    	foreach $object_file (@object_files) {
+	    next if defined $seen_objects{$object_file};
+	    $seen_objects{$object_file} = 1;
+	    if($object_file =~ /\.lib$/io) {
+		$lib_files{$object_file} = 1;
+		next;
+	    }
+	    $object_deps = $all_object_deps{$object_file};
+	    foreach $object_dep (@$object_deps) {
+		if($object_dep =~ /\.c$/io) {
+		    $source_files{$object_dep} = 1;
+		    next;
+		}
+		if($object_dep =~ /\.h$/io) {
+		    $header_files{$object_dep} = 1;
+		    next;
+		}
+                # XXX if I include icons project will not link due to duplicated resources
+		if($object_dep =~ /\.rc$/io) {
+		    $resource_files{$object_dep} = 1;
+		    next;
+		}
+	    }
+    	}
+    	$libs = join ";", sort keys %lib_files;
+    	@source_files = sort keys %source_files;
+    	@header_files = sort keys %header_files;
+    	@resources = sort keys %resource_files;
+	($windows_project, $type) = split ",", $progname;
+    	mkdir $windows_project
+	    if(! -d $windows_project);
+    	chdir $windows_project;
+	$subsys = ($type eq "G") ? "Windows" : "Console";
+    	open OUT, ">$windows_project.vcxproj"; binmode OUT; select OUT;
+        my $vcprojIncludeDirectories = (join ";", map {"..\\..\\$dirpfx$_"} @srcdirs);
+    	print <<EOT;
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <Keyword>Win32Proj</Keyword>
+  </PropertyGroup>
+  <Import Project="\$(VCTargetsPath)\\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'\$(Configuration)|\$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+  </PropertyGroup>
+  <PropertyGroup Condition="'\$(Configuration)|\$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+  </PropertyGroup>
+  <Import Project="\$(VCTargetsPath)\\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets">
+    <Import Project="\$(UserRootDir)\\Microsoft.Cpp.\$(Platform).user.props" Condition="exists('\$(UserRootDir)\\Microsoft.Cpp.\$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <LinkIncremental>false</LinkIncremental>
+  </PropertyGroup>
+  
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PreprocessorDefinitions>WIN32;_WINDOWS;_MBCS;_CRT_SECURE_NO_WARNINGS;HAS_GSSAPI;SECURITY_WIN32;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$vcprojIncludeDirectories;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <WarningLevel>Level3</WarningLevel>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+    </ClCompile>
+    <Link>
+      <TargetMachine>MachineX86</TargetMachine>
+      <SubSystem>$subsys</SubSystem>
+      <AdditionalDependencies>$libs;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  
+  <ItemDefinitionGroup Condition="'\$(Configuration)|\$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <Optimization>Disabled</Optimization>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  
+  <ItemDefinitionGroup Condition="'\$(Configuration)|\$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+    </Link>
+  </ItemDefinitionGroup>
+  
+EOT
+        print "  <ItemGroup>\n";
+    	foreach $source_file (@source_files) {
+            print '    <ClCompile Include="..\\..\\' .$source_file. '" />'."\n";
+    	}
+        print "  </ItemGroup>\n";
+        
+        print "  <ItemGroup>\n";
+        foreach $header_file (@header_files) {
+	    print '    <ClInclude Include="..\\..\\' .$header_file. '" />'."\n";
+	}
+        print "  </ItemGroup>\n";
+        
+        print "  <ItemGroup>\n";
+    	foreach $resource_file (@resources) {
+	    print '    <ResourceCompile Include="..\\..\\' .$resource_file. '" />'."\n";
+	}
+        print "  </ItemGroup>\n";
+        
+        print <<EOT;
+  <Import Project="\$(VCTargetsPath)\\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>
+EOT
+    	select STDOUT; close OUT;
+        
+        open OUT, ">$windows_project.vcxproj.filters"; binmode OUT; select OUT;
+
+        print <<EOT;
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{@{[make_guid]}}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{@{[make_guid]}}</UniqueIdentifier>
+      <Extensions>h;hpp;hxx;hm;inl;inc;xsd</Extensions>
+    </Filter>
+    <Filter Include="Resource Files">
+      <UniqueIdentifier>{@{[make_guid]}}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav</Extensions>
+    </Filter>
+  </ItemGroup>
+</Project>
+EOT
+;
+        select STDOUT; close OUT;
+        
     	chdir "..";
     }
 }
