@@ -454,6 +454,7 @@ void save_open_settings(void *sesskey, Config *cfg)
     write_setting_s(sesskey, "LineCodePage", cfg->line_codepage);
     write_setting_i(sesskey, "CJKAmbigWide", cfg->cjk_ambig_wide);
     write_setting_i(sesskey, "UTF8Override", cfg->utf8_override);
+    write_setting_i(sesskey, "ACSinUTF", cfg->acs_in_utf);
     write_setting_s(sesskey, "Printer", cfg->printer);
     write_setting_i(sesskey, "CapsLockCyr", cfg->xlat_capslockcyr);
     write_setting_i(sesskey, "ScrollBar", cfg->scrollbar);
@@ -795,6 +796,7 @@ void load_open_settings(void *sesskey, Config *cfg)
 	 sizeof(cfg->line_codepage));
     gppi(sesskey, "CJKAmbigWide", 0, &cfg->cjk_ambig_wide);
     gppi(sesskey, "UTF8Override", 1, &cfg->utf8_override);
+    gppi(sesskey, "ACSinUTF", 0, &cfg->acs_in_utf);
     gpps(sesskey, "Printer", "", cfg->printer, sizeof(cfg->printer));
     gppi (sesskey, "CapsLockCyr", 0, &cfg->xlat_capslockcyr);
     gppi(sesskey, "ScrollBar", 1, &cfg->scrollbar);

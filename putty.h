@@ -582,6 +582,7 @@ struct config_tag {
     char line_codepage[128];
     int cjk_ambig_wide;
     int utf8_override;
+    int acs_in_utf;
     int xlat_capslockcyr;
     /* X11 forwarding */
     int x11_forward;
