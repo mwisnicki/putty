@@ -2521,6 +2521,7 @@ static void term_out(Terminal *term)
     int unget;
     unsigned char localbuf[256], *chars;
     int nchars = 0;
+    int allow_acs;
 
     unget = -1;
 
@@ -2597,7 +2598,9 @@ static void term_out(Terminal *term)
 			/* UTF-8 must be stateless so we ignore iso2022. */
 			if (term->ucsdata->unitab_ctrl[c] != 0xFF) 
 			     c = term->ucsdata->unitab_ctrl[c];
-			else c = ((unsigned char)c) | CSET_ASCII;
+			/* unless we don't */
+			else if (!term->cfg.acs_in_utf)
+			    c = ((unsigned char)c) | CSET_ASCII;
 			break;
 		    } else if ((c & 0xe0) == 0xc0) {
 			term->utf_size = term->utf_state = 1;
@@ -2675,13 +2678,15 @@ static void term_out(Terminal *term)
 
 		    break;
 	    }
+	    allow_acs = !in_utf(term) || (term->cfg.acs_in_utf && c < 0x100);
 	    /* Are we in the nasty ACS mode? Note: no sco in utf mode. */
-	    else if(term->sco_acs && 
+	    /* Actually we can allow it for broken apps (like ncurses) */
+	    if (allow_acs && term->sco_acs &&
 		    (c!='\033' && c!='\012' && c!='\015' && c!='\b'))
 	    {
 	       if (term->sco_acs == 2) c |= 0x80;
 	       c |= CSET_SCOACS;
-	    } else {
+	    } else if (allow_acs) {
 		switch (term->cset_attr[term->cset]) {
 		    /* 
 		     * Linedraw characters are different from 'ESC ( B'

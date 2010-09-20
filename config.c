@@ -1633,6 +1633,9 @@ void setup_config_box(struct controlbox *b, int midsession,
     ctrl_checkbox(s, "Copy and paste line drawing characters as lqqqk",'d',
 		  HELPCTX(selection_linedraw),
 		  dlg_stdcheckbox_handler, I(offsetof(Config,rawcnp)));
+    ctrl_checkbox(s, "Allow ACS line drawing in UTF", 'l',
+		  HELPCTX(no_help),
+		  dlg_stdcheckbox_handler, I(offsetof(Config,acs_in_utf)));
 
     /*
      * The Window/Selection panel.
