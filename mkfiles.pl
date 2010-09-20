@@ -935,10 +935,11 @@ if (defined $makefiles{'vcproj11'}) {
 
     $orig_dir = cwd;
     
-    # XXX Win32API::GUID works only on windows, maybe use Data::GUID ?
-    use APR::UUID;
+    use Data::UUID;
+    my $uidgen = new Data::UUID;
+    
     sub make_guid () {
-      return uc APR::UUID->new->format;
+      return $uidgen->create_str();
     }
     
     ##-- MSVC 2010 Solution and projects
