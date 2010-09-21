@@ -665,6 +665,10 @@ GLOBAL int default_port;
  * This is set TRUE by cmdline.c iff a session is loaded with "-load".
  */
 GLOBAL int loaded_session;
+/*
+ * This is set to the name of the loaded session.
+ */
+GLOBAL char *cmdline_session_name;
 
 struct RSAKey;			       /* be a little careful of scope */
 

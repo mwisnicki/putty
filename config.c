@@ -500,6 +500,14 @@ static void sessionsaver_handler(union control *ctrl, void *dlg,
 	     */
 	    if (load_selected_session(ssd, savedsession, dlg, cfg, &mbl) &&
 		(mbl && ctrl == ssd->listbox && cfg_launchable(cfg))) {
+		/* 
+		 * If this is a windows 7 or later OS, update the recent items
+		 * section of the jumplist with the double-clicked item.
+		 */
+		if ((osVersion.dwMajorVersion == 6 && osVersion.dwMinorVersion >= 1) ||
+		    (osVersion.dwMajorVersion > 6) ) {
+		    add_session_to_jumplist(savedsession);
+		}
 		dlg_end(dlg, 1);       /* it's all over, and succeeded */
 	    }
 	} else if (ctrl == ssd->savebutton) {
@@ -537,6 +545,11 @@ static void sessionsaver_handler(union control *ctrl, void *dlg,
 		dlg_beep(dlg);
 	    } else {
 		del_settings(ssd->sesslist.sessions[i]);
+		/* Remove this session from the Windows 7 jumplist, if applicable. */
+		if ((osVersion.dwMajorVersion == 6 && osVersion.dwMinorVersion >= 1) ||
+		    (osVersion.dwMajorVersion > 6) ) {
+		    remove_session_from_jumplist(ssd->sesslist.sessions[i]);
+		}
 		get_sesslist(&ssd->sesslist, FALSE);
 		get_sesslist(&ssd->sesslist, TRUE);
 		dlg_refresh(ssd->listbox, dlg);

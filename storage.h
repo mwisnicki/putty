@@ -91,6 +91,26 @@ void store_host_key(const char *hostname, int port,
 		    const char *keytype, const char *key);
 
 /* ----------------------------------------------------------------------
+ * Functions to manipulate jumplist entries.
+ */
+
+/*
+ * Adds a saved session to the Windows 7 jumplist.
+ */
+int add_to_jumplist_registry (const char *const item);
+
+/*
+ * Removes an item from the jumplist entries in the registry.
+ */
+int remove_from_jumplist_registry (const char *const item);
+
+/*
+ * Returns the jumplist entries from the registry. Caller must free
+ * the returned pointer.
+ */
+char* get_jumplist_registry_entries (void);
+
+/* ----------------------------------------------------------------------
  * Functions to access PuTTY's random number seed file.
  */
 
