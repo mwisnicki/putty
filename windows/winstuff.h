@@ -126,6 +126,14 @@ typedef struct terminal_tag Terminal;
 #define PUTTY_REG_GPARENT "Software"
 #define PUTTY_REG_GPARENT_CHILD "SimonTatham"
 
+/* Result values for the jumplist registry functions. */
+#define JUMPLISTREG_OK 0
+#define JUMPLISTREG_ERROR_INVALID_PARAMETER 1
+#define JUMPLISTREG_ERROR_KEYOPENCREATE_FAILURE 2
+#define JUMPLISTREG_ERROR_VALUEREAD_FAILURE 3
+#define JUMPLISTREG_ERROR_VALUEWRITE_FAILURE 4
+#define JUMPLISTREG_ERROR_INVALID_VALUE 5
+
 #define PUTTY_HELP_FILE "putty.hlp"
 #define PUTTY_CHM_FILE "putty.chm"
 #define PUTTY_HELP_CONTENTS "putty.cnt"
@@ -497,5 +505,13 @@ void agent_schedule_callback(void (*callback)(void *, void *, int),
  * Exports from winser.c.
  */
 extern Backend serial_backend;
+
+/*
+ * Exports from wintaskbar.c.
+ */
+void add_session_to_jumplist(const char * const sessionname);
+void remove_session_from_jumplist(const char * const sessionname);
+void update_jumplist_from_registry (void);
+void clear_jumplist(void);
 
 #endif

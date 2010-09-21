@@ -317,6 +317,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show)
 {
     WNDCLASS wndclass;
     MSG msg;
+    HRESULT hr;
     int guess_width, guess_height;
 
     hinst = inst;
@@ -353,6 +354,18 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show)
     init_help();
 
     init_flashwindow();
+
+    /*
+     * Initialize COM.
+     */
+    hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    if (hr != S_OK && hr != S_FALSE) {
+	char *str = dupprintf("%s Fatal Error", appname);
+	MessageBox(NULL, "Failed to initialize COM subsystem",
+		   str, MB_OK | MB_ICONEXCLAMATION);
+	sfree(str);
+	return 1;
+    }
 
     /*
      * Process the command line.
@@ -543,6 +556,17 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show)
 
 	if (loaded_session || got_host)
 	    allow_launch = TRUE;
+
+	/* 
+	 * If we are starting from a valid saved session and this is a windows 7
+	 * or later OS, update the recent items section of the jumplist.
+	 */
+	if (((osVersion.dwMajorVersion == 6 && osVersion.dwMinorVersion >= 1) ||
+	     (osVersion.dwMajorVersion > 6)) &&
+	    (loaded_session && cfg_launchable(&cfg))) {
+	    add_session_to_jumplist(cmdline_session_name);
+	    sfree(cmdline_session_name);
+	}
 
 	if ((!allow_launch || !cfg_launchable(&cfg)) && !do_config()) {
 	    cleanup_exit(0);
@@ -866,6 +890,9 @@ void cleanup_exit(int code)
 #endif
     }
     shutdown_help();
+
+    /* Clean up COM. */
+    CoUninitialize();
 
     exit(code);
 }
