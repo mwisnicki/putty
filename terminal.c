@@ -2456,8 +2456,33 @@ static void do_osc(Terminal *term)
 	    /* fall through: parameter 0 means set both */
 	  case 2:
 	  case 21:
-	    if (!term->cfg.no_remote_wintitle)
-		set_title(term->frontend, term->osc_string);
+	    if (!term->cfg.no_remote_wintitle) {
+		int line_codepage = term->ucsdata->line_codepage;
+		char* new_title = term->osc_string;
+		char* title_conv = NULL;
+		/* XXX anything else besides UTF-8 ? */
+		if (in_utf(term)) {
+		    /* first convert from multibyte utf to wide */
+		    int nc = mb_to_wc(line_codepage, 0, new_title, -1, NULL, 0);
+		    wchar_t *wtitle = snewn(nc, wchar_t);
+		    int e = mb_to_wc(line_codepage, 0, new_title, -1, wtitle, nc);
+		    new_title = "<Invalid title>";
+		    if (e > 0) {
+			/* then from wide to current ansi codepage */
+			nc = wc_to_mb(CP_ACP, 0, wtitle, -1, NULL, 0, NULL,
+			    NULL, term->ucsdata);
+			title_conv = snewn(nc, char);
+			e = wc_to_mb(CP_ACP, 0, wtitle, -1, title_conv, nc,
+			    NULL, NULL, term->ucsdata);
+			if (e > 0)
+			    new_title = title_conv;
+		    }
+		    sfree(wtitle);
+		}
+		set_title(term->frontend, new_title);
+		if (title_conv != NULL)
+		    sfree(title_conv);
+	    }
 	    break;
 	}
     }
