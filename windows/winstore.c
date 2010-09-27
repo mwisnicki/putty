@@ -27,9 +27,8 @@ static const char hex[16] = "0123456789ABCDEF";
 
 static int tried_shgetfolderpath = FALSE;
 static HMODULE shell32_module = NULL;
-typedef HRESULT (WINAPI *p_SHGetFolderPath_t)
-    (HWND, int, HANDLE, DWORD, LPTSTR);
-static p_SHGetFolderPath_t p_SHGetFolderPath = NULL;
+DECL_WINDOWS_FUNCTION(static, HRESULT, SHGetFolderPathA, 
+		      (HWND, int, HANDLE, DWORD, LPSTR));
 
 // Saved sessions enumeration.
 struct enumsettings {
@@ -2176,4 +2175,231 @@ void reg_store_host_key(const char *hostname, int port,
     } /* else key does not exist in registry */
 
     sfree(regname);
+}
+
+/*
+ * Open (or delete) the random seed file.
+ */
+enum { DEL, OPEN_R, OPEN_W };
+static int try_random_seed(char const *path, int action, HANDLE *ret)
+{
+    if (action == DEL) {
+	remove(path);
+	*ret = INVALID_HANDLE_VALUE;
+	return FALSE;		       /* so we'll do the next ones too */
+    }
+
+    *ret = CreateFile(path,
+		      action == OPEN_W ? GENERIC_WRITE : GENERIC_READ,
+		      action == OPEN_W ? 0 : (FILE_SHARE_READ |
+					      FILE_SHARE_WRITE),
+		      NULL,
+		      action == OPEN_W ? CREATE_ALWAYS : OPEN_EXISTING,
+		      action == OPEN_W ? FILE_ATTRIBUTE_NORMAL : 0,
+		      NULL);
+
+    return (*ret != INVALID_HANDLE_VALUE);
+}
+
+static HANDLE access_random_seed(int action)
+{
+    HKEY rkey;
+    DWORD type, size;
+    HANDLE rethandle;
+    char seedpath[2 * MAX_PATH + 10] = "\0";
+
+    /*
+     * Iterate over a selection of possible random seed paths until
+     * we find one that works.
+     * 
+     * We do this iteration separately for reading and writing,
+     * meaning that we will automatically migrate random seed files
+     * if a better location becomes available (by reading from the
+     * best location in which we actually find one, and then
+     * writing to the best location in which we can _create_ one).
+     */
+
+    /*
+     * First, try the location specified by the user in the
+     * Registry, if any.
+     */
+    size = sizeof(seedpath);
+    if (RegOpenKey(HKEY_CURRENT_USER, PUTTY_REG_POS, &rkey) ==
+	ERROR_SUCCESS) {
+	int ret = RegQueryValueEx(rkey, "RandSeedFile",
+				  0, &type, seedpath, &size);
+	if (ret != ERROR_SUCCESS || type != REG_SZ)
+	    seedpath[0] = '\0';
+	RegCloseKey(rkey);
+
+	if (*seedpath && try_random_seed(seedpath, action, &rethandle))
+	    return rethandle;
+    }
+
+    /*
+     * Next, try the user's local Application Data directory,
+     * followed by their non-local one. This is found using the
+     * SHGetFolderPath function, which won't be present on all
+     * versions of Windows.
+     */
+    if (!tried_shgetfolderpath) {
+	/* This is likely only to bear fruit on systems with IE5+
+	 * installed, or WinMe/2K+. There is some faffing with
+	 * SHFOLDER.DLL we could do to try to find an equivalent
+	 * on older versions of Windows if we cared enough.
+	 * However, the invocation below requires IE5+ anyway,
+	 * so stuff that. */
+	shell32_module = load_system32_dll("shell32.dll");
+	GET_WINDOWS_FUNCTION(shell32_module, SHGetFolderPathA);
+	tried_shgetfolderpath = TRUE;
+    }
+    if (p_SHGetFolderPathA) {
+	if (SUCCEEDED(p_SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA,
+					 NULL, SHGFP_TYPE_CURRENT, seedpath))) {
+	    strcat(seedpath, "\\PUTTY.RND");
+	    if (try_random_seed(seedpath, action, &rethandle))
+		return rethandle;
+	}
+
+	if (SUCCEEDED(p_SHGetFolderPathA(NULL, CSIDL_APPDATA,
+					 NULL, SHGFP_TYPE_CURRENT, seedpath))) {
+	    strcat(seedpath, "\\PUTTY.RND");
+	    if (try_random_seed(seedpath, action, &rethandle))
+		return rethandle;
+	}
+    }
+
+    /*
+     * Failing that, try %HOMEDRIVE%%HOMEPATH% as a guess at the
+     * user's home directory.
+     */
+    {
+	int len, ret;
+
+	len =
+	    GetEnvironmentVariable("HOMEDRIVE", seedpath,
+				   sizeof(seedpath));
+	ret =
+	    GetEnvironmentVariable("HOMEPATH", seedpath + len,
+				   sizeof(seedpath) - len);
+	if (ret != 0) {
+	    strcat(seedpath, "\\PUTTY.RND");
+	    if (try_random_seed(seedpath, action, &rethandle))
+		return rethandle;
+	}
+    }
+
+    /*
+     * And finally, fall back to C:\WINDOWS.
+     */
+    GetWindowsDirectory(seedpath, sizeof(seedpath));
+    strcat(seedpath, "\\PUTTY.RND");
+    if (try_random_seed(seedpath, action, &rethandle))
+	return rethandle;
+
+    /*
+     * If even that failed, give up.
+     */
+    return INVALID_HANDLE_VALUE;
+}
+
+void read_random_seed(noise_consumer_t consumer)
+{
+    HANDLE seedf = access_random_seed(OPEN_R);
+
+    if (seedf != INVALID_HANDLE_VALUE) {
+	while (1) {
+	    char buf[1024];
+	    DWORD len;
+
+	    if (ReadFile(seedf, buf, sizeof(buf), &len, NULL) && len)
+		consumer(buf, len);
+	    else
+		break;
+	}
+	CloseHandle(seedf);
+    }
+}
+
+void write_random_seed(void *data, int len)
+{
+    HANDLE seedf = access_random_seed(OPEN_W);
+
+    if (seedf != INVALID_HANDLE_VALUE) {
+	DWORD lenwritten;
+
+	WriteFile(seedf, data, len, &lenwritten, NULL);
+	CloseHandle(seedf);
+    }
+}
+
+/*
+ * Recursively delete a registry key and everything under it.
+ */
+static void registry_recursive_remove(HKEY key)
+{
+    DWORD i;
+    char name[MAX_PATH + 1];
+    HKEY subkey;
+
+    i = 0;
+    while (RegEnumKey(key, i, name, sizeof(name)) == ERROR_SUCCESS) {
+	if (RegOpenKey(key, name, &subkey) == ERROR_SUCCESS) {
+	    registry_recursive_remove(subkey);
+	    RegCloseKey(subkey);
+	}
+	RegDeleteKey(key, name);
+    }
+}
+
+void cleanup_all(void)
+{
+    HKEY key;
+    int ret;
+    char name[MAX_PATH + 1];
+
+    /* ------------------------------------------------------------
+     * Wipe out the random seed file, in all of its possible
+     * locations.
+     */
+    access_random_seed(DEL);
+
+    /* ------------------------------------------------------------
+     * Destroy all registry information associated with PuTTY.
+     */
+
+    /*
+     * Open the main PuTTY registry key and remove everything in it.
+     */
+    if (RegOpenKey(HKEY_CURRENT_USER, PUTTY_REG_POS, &key) ==
+	ERROR_SUCCESS) {
+	registry_recursive_remove(key);
+	RegCloseKey(key);
+    }
+    /*
+     * Now open the parent key and remove the PuTTY main key. Once
+     * we've done that, see if the parent key has any other
+     * children.
+     */
+    if (RegOpenKey(HKEY_CURRENT_USER, PUTTY_REG_PARENT,
+		   &key) == ERROR_SUCCESS) {
+	RegDeleteKey(key, PUTTY_REG_PARENT_CHILD);
+	ret = RegEnumKey(key, 0, name, sizeof(name));
+	RegCloseKey(key);
+	/*
+	 * If the parent key had no other children, we must delete
+	 * it in its turn. That means opening the _grandparent_
+	 * key.
+	 */
+	if (ret != ERROR_SUCCESS) {
+	    if (RegOpenKey(HKEY_CURRENT_USER, PUTTY_REG_GPARENT,
+			   &key) == ERROR_SUCCESS) {
+		RegDeleteKey(key, PUTTY_REG_GPARENT_CHILD);
+		RegCloseKey(key);
+	    }
+	}
+    }
+    /*
+     * Now we're done.
+     */
 }

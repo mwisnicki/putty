@@ -116,7 +116,7 @@ struct hostport {
 void config_protocolbuttons_handler(union control *ctrl, void *dlg,
 				    void *data, int event)
 {
-    int button, defport;
+    int button;
     Config *cfg = (Config *)data;
     struct hostport *hp = (struct hostport *)ctrl->radio.context.p;
 
@@ -140,15 +140,20 @@ void config_protocolbuttons_handler(union control *ctrl, void *dlg,
 	assert(button >= 0 && button < ctrl->radio.nbuttons);
 	cfg->protocol = ctrl->radio.buttondata[button].i;
 	if (oldproto != cfg->protocol) {
-	    defport = -1;
-	    switch (cfg->protocol) {
-	      case PROT_SSH: defport = 22; break;
-	      case PROT_TELNET: defport = 23; break;
-	      case PROT_RLOGIN: defport = 513; break;
-	    }
-	    if (defport > 0 && cfg->port != defport) {
-		cfg->port = defport;
-	    }
+	    Backend *ob = backend_from_proto(oldproto);
+	    Backend *nb = backend_from_proto(cfg->protocol);
+	    assert(ob);
+	    assert(nb);
+	    /* Iff the user hasn't changed the port from the protocol
+	     * default (if any), update it with the new protocol's
+	     * default.
+	     * (XXX: this isn't perfect; a default can become permanent
+	     * by going via the serial backend. However, it helps with
+	     * the common case of tabbing through the controls in order
+	     * and setting a non-default port.) */
+	    if (cfg->port == ob->default_port &&
+		cfg->port > 0 && nb->default_port > 0)
+		cfg->port = nb->default_port;
 	}
 	dlg_refresh(hp->host, dlg);
 	dlg_refresh(hp->port, dlg);
@@ -302,6 +307,33 @@ static void cipherlist_handler(union control *ctrl, void *dlg,
     }
 }
 
+#ifndef NO_GSSAPI
+static void gsslist_handler(union control *ctrl, void *dlg,
+			    void *data, int event)
+{
+    Config *cfg = (Config *)data;
+    if (event == EVENT_REFRESH) {
+	int i;
+
+	dlg_update_start(ctrl, dlg);
+	dlg_listbox_clear(ctrl, dlg);
+	for (i = 0; i < ngsslibs; i++) {
+	    int id = cfg->ssh_gsslist[i];
+	    assert(id >= 0 && id < ngsslibs);
+	    dlg_listbox_addwithid(ctrl, dlg, gsslibnames[id], id);
+	}
+	dlg_update_done(ctrl, dlg);
+
+    } else if (event == EVENT_VALCHANGE) {
+	int i;
+
+	/* Update array to match the list box. */
+	for (i=0; i < ngsslibs; i++)
+	    cfg->ssh_gsslist[i] = dlg_listbox_getid(ctrl, dlg, i);
+    }
+}
+#endif
+
 static void kexlist_handler(union control *ctrl, void *dlg,
 			    void *data, int event)
 {
@@ -313,6 +345,7 @@ static void kexlist_handler(union control *ctrl, void *dlg,
 	    { "Diffie-Hellman group 1",		KEX_DHGROUP1 },
 	    { "Diffie-Hellman group 14",	KEX_DHGROUP14 },
 	    { "Diffie-Hellman group exchange",	KEX_DHGEX },
+	    { "RSA-based key exchange", 	KEX_RSA },
 	    { "-- warn below here --",		KEX_WARN }
 	};
 
@@ -382,14 +415,14 @@ static void codepage_handler(union control *ctrl, void *dlg,
     Config *cfg = (Config *)data;
     if (event == EVENT_REFRESH) {
 	int i;
-	const char *cp;
+	const char *cp, *thiscp;
 	dlg_update_start(ctrl, dlg);
-	strcpy(cfg->line_codepage,
-	       cp_name(decode_codepage(cfg->line_codepage)));
+	thiscp = cp_name(decode_codepage(cfg->line_codepage));
 	dlg_listbox_clear(ctrl, dlg);
 	for (i = 0; (cp = cp_enumerate(i)) != NULL; i++)
 	    dlg_listbox_add(ctrl, dlg, cp);
-	dlg_editbox_set(ctrl, dlg, cfg->line_codepage);
+	dlg_editbox_set(ctrl, dlg, thiscp);
+	strcpy(cfg->line_codepage, thiscp);
 	dlg_update_done(ctrl, dlg);
     } else if (event == EVENT_VALCHANGE) {
 	dlg_editbox_get(ctrl, dlg, cfg->line_codepage,
@@ -690,7 +723,7 @@ static void colour_handler(union control *ctrl, void *dlg,
     Config *cfg = (Config *)data;
     struct colour_data *cd =
 	(struct colour_data *)ctrl->generic.context.p;
-    int update = FALSE, r, g, b;
+    int update = FALSE, clear = FALSE, r, g, b;
 
     if (event == EVENT_REFRESH) {
 	if (ctrl == cd->listbox) {
@@ -700,21 +733,21 @@ static void colour_handler(union control *ctrl, void *dlg,
 	    for (i = 0; i < lenof(colours); i++)
 		dlg_listbox_add(ctrl, dlg, colours[i]);
 	    dlg_update_done(ctrl, dlg);
-	    dlg_editbox_set(cd->redit, dlg, "");
-	    dlg_editbox_set(cd->gedit, dlg, "");
-	    dlg_editbox_set(cd->bedit, dlg, "");
+	    clear = TRUE;
+	    update = TRUE;
 	}
     } else if (event == EVENT_SELCHANGE) {
 	if (ctrl == cd->listbox) {
 	    /* The user has selected a colour. Update the RGB text. */
 	    int i = dlg_listbox_index(ctrl, dlg);
 	    if (i < 0) {
-		dlg_beep(dlg);
-		return;
+		clear = TRUE;
+	    } else {
+		clear = FALSE;
+		r = cfg->colours[i][0];
+		g = cfg->colours[i][1];
+		b = cfg->colours[i][2];
 	    }
-	    r = cfg->colours[i][0];
-	    g = cfg->colours[i][1];
-	    b = cfg->colours[i][2];
 	    update = TRUE;
 	}
     } else if (event == EVENT_VALCHANGE) {
@@ -767,16 +800,23 @@ static void colour_handler(union control *ctrl, void *dlg,
 		cfg->colours[i][0] = r;
 		cfg->colours[i][1] = g;
 		cfg->colours[i][2] = b;
+		clear = FALSE;
 		update = TRUE;
 	    }
 	}
     }
 
     if (update) {
-	char buf[40];
-	sprintf(buf, "%d", r); dlg_editbox_set(cd->redit, dlg, buf);
-	sprintf(buf, "%d", g); dlg_editbox_set(cd->gedit, dlg, buf);
-	sprintf(buf, "%d", b); dlg_editbox_set(cd->bedit, dlg, buf);
+	if (clear) {
+	    dlg_editbox_set(cd->redit, dlg, "");
+	    dlg_editbox_set(cd->gedit, dlg, "");
+	    dlg_editbox_set(cd->bedit, dlg, "");
+	} else {
+	    char buf[40];
+	    sprintf(buf, "%d", r); dlg_editbox_set(cd->redit, dlg, buf);
+	    sprintf(buf, "%d", g); dlg_editbox_set(cd->gedit, dlg, buf);
+	    sprintf(buf, "%d", b); dlg_editbox_set(cd->bedit, dlg, buf);
+	}
     }
 }
 
@@ -1076,19 +1116,25 @@ static void portfwd_handler(union control *ctrl, void *dlg,
 		*p = '\0';
 	    p = cfg->portfwd;
 	    while (*p) {
+		if (strcmp(p,str) == 0) {
+		    dlg_error_msg(dlg, "Specified forwarding already exists");
+		    break;
+		}
 		while (*p)
 		    p++;
 		p++;
 	    }
-	    if ((p - cfg->portfwd) + strlen(str) + 2 <=
-		sizeof(cfg->portfwd)) {
-		strcpy(p, str);
-		p[strlen(str) + 1] = '\0';
-		dlg_listbox_add(pfd->listbox, dlg, str);
-		dlg_editbox_set(pfd->sourcebox, dlg, "");
-		dlg_editbox_set(pfd->destbox, dlg, "");
-	    } else {
-		dlg_error_msg(dlg, "Too many forwardings");
+	    if (!*p) {
+		if ((p - cfg->portfwd) + strlen(str) + 2 <=
+		    sizeof(cfg->portfwd)) {
+		    strcpy(p, str);
+		    p[strlen(str) + 1] = '\0';
+		    dlg_listbox_add(pfd->listbox, dlg, str);
+		    dlg_editbox_set(pfd->sourcebox, dlg, "");
+		    dlg_editbox_set(pfd->destbox, dlg, "");
+		} else {
+		    dlg_error_msg(dlg, "Too many forwardings");
+		}
 	    }
 	} else if (ctrl == pfd->rembutton) {
 	    int i = dlg_listbox_index(pfd->listbox, dlg);
@@ -1116,7 +1162,9 @@ static void portfwd_handler(union control *ctrl, void *dlg,
 		{
 		    static const char *const afs = "A46";
 		    char *afp = strchr(afs, *p);
+#ifndef NO_IPV6
 		    int idx = afp ? afp-afs : 0;
+#endif
 		    if (afp)
 			p++;
 #ifndef NO_IPV6
@@ -1225,11 +1273,11 @@ void setup_config_box(struct controlbox *b, int midsession,
 	hp->port = c;
 	ctrl_columns(s, 1, 100);
 
-	if (!have_backend(PROT_SSH)) {
+	if (!backend_from_proto(PROT_SSH)) {
 	    ctrl_radiobuttons(s, "Connection type:", NO_SHORTCUT, 3,
 			      HELPCTX(session_hostname),
 			      config_protocolbuttons_handler, P(hp),
-			      "Raw", 'r', I(PROT_RAW),
+			      "Raw", 'w', I(PROT_RAW),
 			      "Telnet", 't', I(PROT_TELNET),
 			      "Rlogin", 'i', I(PROT_RLOGIN),
 			      NULL);
@@ -1237,7 +1285,7 @@ void setup_config_box(struct controlbox *b, int midsession,
 	    ctrl_radiobuttons(s, "Connection type:", NO_SHORTCUT, 4,
 			      HELPCTX(session_hostname),
 			      config_protocolbuttons_handler, P(hp),
-			      "Raw", 'r', I(PROT_RAW),
+			      "Raw", 'w', I(PROT_RAW),
 			      "Telnet", 't', I(PROT_TELNET),
 			      "Rlogin", 'i', I(PROT_RLOGIN),
 			      "SSH", 's', I(PROT_SSH),
@@ -1318,7 +1366,7 @@ void setup_config_box(struct controlbox *b, int midsession,
 	/** HACK: END **/
 
     s = ctrl_getset(b, "Session", "otheropts", NULL);
-    c = ctrl_radiobuttons(s, "Close window on exit:", 'w', 4,
+    c = ctrl_radiobuttons(s, "Close window on exit:", 'x', 4,
 			  HELPCTX(session_coe),
 			  dlg_stdradiobutton_handler,
 			  I(offsetof(Config, close_on_exit)),
@@ -1339,7 +1387,7 @@ void setup_config_box(struct controlbox *b, int midsession,
     {
 	char *sshlogname, *sshrawlogname;
 	if ((midsession && protocol == PROT_SSH) ||
-	    (!midsession && have_backend(PROT_SSH))) {
+	    (!midsession && backend_from_proto(PROT_SSH))) {
 	    sshlogname = "SSH packets";
 	    sshrawlogname = "SSH packets and raw data";
         } else {
@@ -1375,7 +1423,7 @@ void setup_config_box(struct controlbox *b, int midsession,
 		 dlg_stdcheckbox_handler, I(offsetof(Config,logflush)));
 
     if ((midsession && protocol == PROT_SSH) ||
-	(!midsession && have_backend(PROT_SSH))) {
+	(!midsession && backend_from_proto(PROT_SSH))) {
 	s = ctrl_getset(b, "Session/Logging", "ssh",
 			"Options specific to SSH packet logging");
 	ctrl_checkbox(s, "Omit known password fields", 'k',
@@ -1401,6 +1449,9 @@ void setup_config_box(struct controlbox *b, int midsession,
     ctrl_checkbox(s, "Implicit CR in every LF", 'r',
 		  HELPCTX(terminal_lfhascr),
 		  dlg_stdcheckbox_handler, I(offsetof(Config,lfhascr)));
+    ctrl_checkbox(s, "Implicit LF in every CR", 'f',
+		  HELPCTX(terminal_crhaslf),
+		  dlg_stdcheckbox_handler, I(offsetof(Config,crhaslf)));
     ctrl_checkbox(s, "Use background colour to erase screen", 'e',
 		  HELPCTX(terminal_bce),
 		  dlg_stdcheckbox_handler, I(offsetof(Config,bce)));
@@ -1656,8 +1707,8 @@ void setup_config_box(struct controlbox *b, int midsession,
 		  "Options controlling character set translation");
 
     s = ctrl_getset(b, "Window/Translation", "trans",
-		    "Character set translation on received data");
-    ctrl_combobox(s, "Received data assumed to be in which character set:",
+		    "Character set translation");
+    ctrl_combobox(s, "Remote character set:",
 		  'r', 100, HELPCTX(translation_codepage),
 		  codepage_handler, P(NULL), P(NULL));
 
@@ -1807,6 +1858,18 @@ void setup_config_box(struct controlbox *b, int midsession,
 			  "IPv6", '6', I(ADDRTYPE_IPV6),
 			  NULL);
 #endif
+
+	    {
+		char *label = backend_from_proto(PROT_SSH) ?
+		    "Logical name of remote host (e.g. for SSH key lookup):" :
+		    "Logical name of remote host:";
+		s = ctrl_getset(b, "Connection", "identity",
+				"Logical name of remote host");
+		ctrl_editbox(s, label, 'm', 100,
+			     HELPCTX(connection_loghost),
+			     dlg_stdeditbox_handler, I(offsetof(Config,loghost)),
+			     I(sizeof(((Config *)0)->loghost)));
+	    }
 	}
 
 	/*
@@ -1822,6 +1885,22 @@ void setup_config_box(struct controlbox *b, int midsession,
 			 HELPCTX(connection_username),
 			 dlg_stdeditbox_handler, I(offsetof(Config,username)),
 			 I(sizeof(((Config *)0)->username)));
+	    {
+		/* We assume the local username is sufficiently stable
+		 * to include on the dialog box. */
+		char *user = get_username();
+		char *userlabel = dupprintf("Use system username (%s)",
+					    user ? user : "");
+		sfree(user);
+		ctrl_radiobuttons(s, "When username is not specified:", 'n', 4,
+				  HELPCTX(connection_username_from_env),
+				  dlg_stdradiobutton_handler,
+				  I(offsetof(Config, username_from_env)),
+				  "Prompt", I(FALSE),
+				  userlabel, I(TRUE),
+				  NULL);
+		sfree(userlabel);
+	    }
 
 	    s = ctrl_getset(b, "Connection/Data", "term",
 			    "Terminal details");
@@ -1994,7 +2073,7 @@ void setup_config_box(struct controlbox *b, int midsession,
      * when we're not doing SSH.
      */
 
-    if (have_backend(PROT_SSH) && (!midsession || protocol == PROT_SSH)) {
+    if (backend_from_proto(PROT_SSH) && (!midsession || protocol == PROT_SSH)) {
 
 	/*
 	 * The Connection/SSH panel.
@@ -2122,19 +2201,44 @@ void setup_config_box(struct controlbox *b, int midsession,
 			  dlg_stdcheckbox_handler,
 			  I(offsetof(Config,try_ki_auth)));
 
+#ifndef NO_GSSAPI
+	    ctrl_checkbox(s, "Attempt GSSAPI auth (SSH-2)",
+			  NO_SHORTCUT, HELPCTX(no_help),
+			  dlg_stdcheckbox_handler,
+			  I(offsetof(Config,try_gssapi_auth)));
+#endif
+
 	    s = ctrl_getset(b, "Connection/SSH/Auth", "params",
 			    "Authentication parameters");
 	    ctrl_checkbox(s, "Allow agent forwarding", 'f',
 			  HELPCTX(ssh_auth_agentfwd),
 			  dlg_stdcheckbox_handler, I(offsetof(Config,agentfwd)));
-	    ctrl_checkbox(s, "Allow attempted changes of username in SSH-2", 'u',
+	    ctrl_checkbox(s, "Allow attempted changes of username in SSH-2", NO_SHORTCUT,
 			  HELPCTX(ssh_auth_changeuser),
 			  dlg_stdcheckbox_handler,
 			  I(offsetof(Config,change_username)));
+#ifndef NO_GSSAPI
+	    ctrl_checkbox(s, "Allow GSSAPI credential delegation in SSH-2", NO_SHORTCUT,
+			  HELPCTX(no_help),
+			  dlg_stdcheckbox_handler,
+			  I(offsetof(Config,gssapifwd)));
+#endif
 	    ctrl_filesel(s, "Private key file for authentication:", 'k',
 			 FILTER_KEY_FILES, FALSE, "Select private key file",
 			 HELPCTX(ssh_auth_privkey),
 			 dlg_stdfilesel_handler, I(offsetof(Config, keyfile)));
+
+#ifndef NO_GSSAPI
+	    /*
+	     * GSSAPI library selection.
+	     */
+	    if (ngsslibs > 1) {
+		c = ctrl_draglist(s, "Preference order for GSSAPI libraries:", NO_SHORTCUT,
+				  HELPCTX(no_help),
+				  gsslist_handler, P(NULL));
+		c->listbox.height = ngsslibs;
+	    }
+#endif
 	}
 
 	if (!midsession) {
@@ -2316,6 +2420,9 @@ void setup_config_box(struct controlbox *b, int midsession,
 	    ctrl_droplist(s, "Chokes on SSH-1 RSA authentication", 'r', 20,
 			  HELPCTX(ssh_bugs_rsa1),
 			  sshbug_handler, I(offsetof(Config,sshbug_rsa1)));
+	    ctrl_droplist(s, "Chokes on SSH-2 ignore messages", '2', 20,
+			  HELPCTX(ssh_bugs_ignore2),
+			  sshbug_handler, I(offsetof(Config,sshbug_ignore2)));
 	    ctrl_droplist(s, "Miscomputes SSH-2 HMAC keys", 'm', 20,
 			  HELPCTX(ssh_bugs_hmac2),
 			  sshbug_handler, I(offsetof(Config,sshbug_hmac2)));
@@ -2331,6 +2438,9 @@ void setup_config_box(struct controlbox *b, int midsession,
 	    ctrl_droplist(s, "Handles SSH-2 key re-exchange badly", 'k', 20,
 			  HELPCTX(ssh_bugs_rekey2),
 			  sshbug_handler, I(offsetof(Config,sshbug_rekey2)));
+	    ctrl_droplist(s, "Ignores SSH-2 maximum packet size", 'x', 20,
+			  HELPCTX(ssh_bugs_maxpkt2),
+			  sshbug_handler, I(offsetof(Config,sshbug_maxpkt2)));
 	}
     }
 }

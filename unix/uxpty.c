@@ -260,7 +260,8 @@ static void cleanup_utmp(void)
 
 static void sigchld_handler(int signum)
 {
-    write(pty_signal_pipe[1], "x", 1);
+    if (write(pty_signal_pipe[1], "x", 1) <= 0)
+	/* not much we can do about it */;
 }
 
 #ifndef OMIT_UTMP
@@ -360,8 +361,10 @@ static void pty_open_master(Pty pty)
         /*
          * Set the pty master into non-blocking mode.
          */
-        int i = 1;
-        ioctl(pty->master_fd, FIONBIO, &i);
+        int fl;
+	fl = fcntl(pty->master_fd, F_GETFL);
+	if (fl != -1 && !(fl & O_NONBLOCK))
+	    fcntl(pty->master_fd, F_SETFL, fl | O_NONBLOCK);
     }
 
     if (!ptys_by_fd)
@@ -631,7 +634,9 @@ int pty_select_result(int fd, int event)
 	int status;
 	char c[1];
 
-	read(pty_signal_pipe[0], c, 1); /* ignore its value; it'll be `x' */
+	if (read(pty_signal_pipe[0], c, 1) <= 0)
+	    /* ignore error */;
+	/* ignore its value; it'll be `x' */
 
 	do {
 	    pid = waitpid(-1, &status, WNOHANG);
@@ -1085,5 +1090,7 @@ Backend pty_backend = {
     pty_provide_logctx,
     pty_unthrottle,
     pty_cfg_info,
-    1
+    "pty",
+    -1,
+    0
 };

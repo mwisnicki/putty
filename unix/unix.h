@@ -6,6 +6,10 @@
 #endif
 
 #include <stdio.h>		       /* for FILENAME_MAX */
+#include <stdint.h>		       /* C99 int types */
+#ifndef NO_LIBDL
+#include <dlfcn.h>		       /* Dynamic library loading */
+#endif /*  NO_LIBDL */
 #include "charset.h"
 
 struct Filename {
@@ -23,6 +27,9 @@ typedef int OSSocket;
 #define OSSOCKET_DEFINED	       /* stop network.h using its default */
 
 extern Backend pty_backend;
+
+typedef uint32_t uint32; /* C99: uint32_t defined in stdint.h */
+#define PUTTY_UINT32_DEFINED
 
 /*
  * Under GTK, we send MA_CLICK _and_ MA_2CLK, or MA_CLICK _and_
@@ -60,6 +67,18 @@ extern long tickcount_offset;
 #define WCHAR wchar_t
 #define BYTE unsigned char
 
+/*
+ * Unix-specific global flag
+ *
+ * FLAG_STDERR_TTY indicates that standard error might be a terminal and
+ * might get its configuration munged, so anything trying to output plain
+ * text (i.e. with newlines in it) will need to put it back into cooked
+ * mode first.  Applications setting this flag should also call
+ * stderr_tty_init() before messing with any terminal modes, and can call
+ * premsg() before outputting text to stderr and postmsg() afterwards.
+ */
+#define FLAG_STDERR_TTY 0x1000
+
 /* Things pty.c needs from pterm.c */
 char *get_x_display(void *frontend);
 int font_dimension(void *frontend, int which);/* 0 for width, 1 for height */
@@ -90,6 +109,12 @@ char *x_get_default(const char *key);
 
 /* Things uxstore.c provides to pterm.c */
 void provide_xrm_string(char *string);
+
+/* Things provided by uxcons.c */
+struct termios;
+void stderr_tty_init(void);
+void premsg(struct termios *);
+void postmsg(struct termios *);
 
 /* The interface used by uxsel.c */
 void uxsel_init(void);

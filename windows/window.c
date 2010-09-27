@@ -77,6 +77,7 @@
 #define WM_IGNORE_CLIP (WM_APP + 2)
 #define WM_FULLSCR_ON_MAX (WM_APP + 3)
 #define WM_AGENT_CALLBACK (WM_APP + 4)
+#define WM_GOT_CLIPDATA (WM_APP + 6)
 
 /* Needed for Chinese support and apparently not always defined. */
 #ifndef VK_PROCESSKEY
@@ -109,6 +110,7 @@ static int is_full_screen(void);
 static void make_full_screen(void);
 static void clear_full_screen(void);
 static void flip_full_screen(void);
+static int process_clipdata(HGLOBAL clipdata, int unicode);
 
 /* Window layout information */
 static void reset_window(int);
@@ -124,7 +126,6 @@ static LPARAM pend_netevent_lParam = 0;
 static void enact_pending_netevent(void);
 static void flash_window(int mode);
 static void sys_cursor_update(void);
-static int is_shift_pressed(void);
 static int get_fullscreen_rect(RECT * ss);
 
 static int caret_x = -1, caret_y = -1;
@@ -142,6 +143,9 @@ static int reconfiguring = FALSE;
 static const struct telnet_special *specials = NULL;
 static HMENU specials_menu = NULL;
 static int n_specials = 0;
+
+static wchar_t *clipboard_contents;
+static size_t clipboard_length;
 
 #define TIMING_TIMER_ID 1234
 static long timing_next_time;
@@ -281,12 +285,7 @@ static void start_backend(void)
      * Select protocol. This is farmed out into a table in a
      * separate file to enable an ssh-free variant.
      */
-    back = NULL;
-    for (i = 0; backends[i].backend != NULL; i++)
-	if (backends[i].protocol == cfg.protocol) {
-	    back = backends[i].backend;
-	    break;
-	}
+    back = backend_from_proto(cfg.protocol);
     if (back == NULL) {
 	char *str = dupprintf("%s Internal Error", appname);
 	MessageBox(NULL, "Unsupported protocol number found",
@@ -431,13 +430,10 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show)
 	default_protocol = be_default_protocol;
 	/* Find the appropriate default port. */
 	{
-	    int i;
+	    Backend *b = backend_from_proto(default_protocol);
 	    default_port = 0; /* illegal */
-	    for (i = 0; backends[i].backend != NULL; i++)
-		if (backends[i].protocol == default_protocol) {
-		    default_port = backends[i].backend->default_port;
-		    break;
-		}
+	    if (b)
+		default_port = b->default_port;
 	}
 	cfg.logtype = LGTYP_NONE;
 
@@ -724,7 +720,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmdline, int show)
     guess_height = extra_height + font_height * cfg.height;
     {
 	RECT r;
-		get_fullscreen_rect(&r);
+	get_fullscreen_rect(&r);
 	if (guess_width > r.right - r.left)
 	    guess_width = r.right - r.left;
 	if (guess_height > r.bottom - r.top)
@@ -1078,6 +1074,8 @@ static void update_savedsess_menu(void)
 	AppendMenu(savedsess_menu, MF_ENABLED,
 		   IDM_SAVED_MIN + (i-1)*MENU_SAVED_STEP,
 		   sesslist.sessions[i]);
+    if (sesslist.nsessions <= 1)
+	AppendMenu(savedsess_menu, MF_GRAYED, IDM_SAVED_MIN, "(No sessions)");
 }
 
 /*
@@ -1508,12 +1506,12 @@ debug(("\n           rect: [%d,%d %d,%d]\n", newrc.left, newrc.top, newrc.right,
 #ifdef FIXME_REMOVE_BEFORE_CHECKIN
 debug(("general_textout: done, xn=%d\n", xn));
 #endif
-    assert(xn - x == lprc->right - lprc->left);
+    assert(xn - x >= lprc->right - lprc->left);
 }
 
 /*
  * Initialise all the fonts we will need initially. There may be as many as
- * three or as few as one.  The other (poentially) twentyone fonts are done
+ * three or as few as one.  The other (potentially) twenty-one fonts are done
  * if/when they are needed.
  *
  * We also:
@@ -2090,17 +2088,6 @@ static int is_alt_pressed(void)
     return FALSE;
 }
 
-static int is_shift_pressed(void)
-{
-    BYTE keystate[256];
-    int r = GetKeyboardState(keystate);
-    if (!r)
-	return FALSE;
-    if (keystate[VK_SHIFT] & 0x80)
-	return TRUE;
-    return FALSE;
-}
-
 static int resizing;
 
 void notify_remote_exit(void *fe)
@@ -2310,10 +2297,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT message,
 
 		{
 		    /* Disable full-screen if resizing forbidden */
-		    HMENU m = GetSystemMenu (hwnd, FALSE);
-		    EnableMenuItem(m, IDM_FULLSCREEN, MF_BYCOMMAND | 
-				   (cfg.resize_action == RESIZE_DISABLED)
-				   ? MF_GRAYED : MF_ENABLED);
+		    int i;
+		    for (i = 0; i < lenof(popup_menus); i++)
+			EnableMenuItem(popup_menus[i].menu, IDM_FULLSCREEN,
+				       MF_BYCOMMAND | 
+				       (cfg.resize_action == RESIZE_DISABLED)
+				       ? MF_GRAYED : MF_ENABLED);
 		    /* Gracefully unzoom if necessary */
 		    if (IsZoomed(hwnd) &&
 			(cfg.resize_action == RESIZE_DISABLED)) {
@@ -2512,7 +2501,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT message,
 	    term_copyall(term);
 	    break;
 	  case IDM_PASTE:
-	    term_do_paste(term);
+	    request_paste(NULL);
 	    break;
 	  case IDM_CLRSB:
 	    term_clrsb(term);
@@ -2626,26 +2615,32 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT message,
 	    switch (message) {
 	      case WM_LBUTTONDOWN:
 		button = MBT_LEFT;
+		wParam |= MK_LBUTTON;
 		press = 1;
 		break;
 	      case WM_MBUTTONDOWN:
 		button = MBT_MIDDLE;
+		wParam |= MK_MBUTTON;
 		press = 1;
 		break;
 	      case WM_RBUTTONDOWN:
 		button = MBT_RIGHT;
+		wParam |= MK_RBUTTON;
 		press = 1;
 		break;
 	      case WM_LBUTTONUP:
 		button = MBT_LEFT;
+		wParam &= ~MK_LBUTTON;
 		press = 0;
 		break;
 	      case WM_MBUTTONUP:
 		button = MBT_MIDDLE;
+		wParam &= ~MK_MBUTTON;
 		press = 0;
 		break;
 	      case WM_RBUTTONUP:
 		button = MBT_RIGHT;
+		wParam &= ~MK_RBUTTON;
 		press = 0;
 		break;
 	      default:
@@ -2704,7 +2699,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT message,
 			   TO_CHR_X(X_POS(lParam)),
 			   TO_CHR_Y(Y_POS(lParam)), wParam & MK_SHIFT,
 			   wParam & MK_CONTROL, is_alt_pressed());
-		ReleaseCapture();
+		if (!(wParam & (MK_LBUTTON | MK_MBUTTON | MK_RBUTTON)))
+		    ReleaseCapture();
 	    }
 	}
 	return 0;
@@ -3465,6 +3461,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT message,
 	 * END HACKS: PuttyTray / Trayicon & Reconnect
 	 */
 
+      case WM_GOT_CLIPDATA:
+	if (process_clipdata((HGLOBAL)lParam, wParam))
+	    term_do_paste(term);
+	return 0;
       default:
 	if (message == wm_mousewheel || message == WM_MOUSEWHEEL) {
 	    int shift_pressed=0, control_pressed=0;
@@ -3498,16 +3498,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT message,
 
 		if (send_raw_mouse &&
 		    !(cfg.mouse_override && shift_pressed)) {
-		    /* send a mouse-down followed by a mouse up */
-		    term_mouse(term, b, translate_button(b),
-			       MA_CLICK,
-			       TO_CHR_X(X_POS(lParam)),
-			       TO_CHR_Y(Y_POS(lParam)), shift_pressed,
-			       control_pressed, is_alt_pressed());
-		    term_mouse(term, b, translate_button(b),
-			       MA_RELEASE, TO_CHR_X(X_POS(lParam)),
-			       TO_CHR_Y(Y_POS(lParam)), shift_pressed,
-			       control_pressed, is_alt_pressed());
+		    /* Mouse wheel position is in screen coordinates for
+		     * some reason */
+		    POINT p;
+		    p.x = X_POS(lParam); p.y = Y_POS(lParam);
+		    if (ScreenToClient(hwnd, &p)) {
+			/* send a mouse-down followed by a mouse up */
+			term_mouse(term, b, translate_button(b),
+				   MA_CLICK,
+				   TO_CHR_X(p.x),
+				   TO_CHR_Y(p.y), shift_pressed,
+				   control_pressed, is_alt_pressed());
+			term_mouse(term, b, translate_button(b),
+				   MA_RELEASE, TO_CHR_X(p.x),
+				   TO_CHR_Y(p.y), shift_pressed,
+				   control_pressed, is_alt_pressed());
+		    } /* else: not sure when this can fail */
 		} else {
 		    /* trigger a scroll */
 		    term_scroll(term, 0,
@@ -4258,8 +4264,12 @@ static int TranslateKey(UINT message, WPARAM wParam, LPARAM lParam,
 	    SendMessage(hwnd, WM_VSCROLL, SB_LINEDOWN, 0);
 	    return 0;
 	}
+	if ((wParam == VK_PRIOR || wParam == VK_NEXT) && shift_state == 3) {
+	    term_scroll_to_selection(term, (wParam == VK_PRIOR ? 0 : 1));
+	    return 0;
+	}
 	if (wParam == VK_INSERT && shift_state == 1) {
-	    term_do_paste(term);
+	    request_paste(NULL);
 	    return 0;
 	}
 	if (left_alt && wParam == VK_F4 && cfg.alt_f4) {
@@ -4456,7 +4466,7 @@ static int TranslateKey(UINT message, WPARAM wParam, LPARAM lParam,
 	    *p++ = 0x1F;
 	    return p - output;
 	}
-	if (shift_state == 2 && wParam == 0xDF) {
+	if (shift_state == 2 && (wParam == 0xDF || wParam == 0xDC)) {
 	    *p++ = 0x1C;
 	    return p - output;
 	}
@@ -4661,37 +4671,7 @@ static int TranslateKey(UINT message, WPARAM wParam, LPARAM lParam,
 		break;
 	    }
 	    if (xkey) {
-		if (term->vt52_mode)
-		    p += sprintf((char *) p, "\x1B%c", xkey);
-		else {
-		    int app_flg = (term->app_cursor_keys && !cfg.no_applic_c);
-#if 0
-		    /*
-		     * RDB: VT100 & VT102 manuals both state the
-		     * app cursor keys only work if the app keypad
-		     * is on.
-		     * 
-		     * SGT: That may well be true, but xterm
-		     * disagrees and so does at least one
-		     * application, so I've #if'ed this out and the
-		     * behaviour is back to PuTTY's original: app
-		     * cursor and app keypad are independently
-		     * switchable modes. If anyone complains about
-		     * _this_ I'll have to put in a configurable
-		     * option.
-		     */
-		    if (!term->app_keypad_keys)
-			app_flg = 0;
-#endif
-		    /* Useful mapping of Ctrl-arrows */
-		    if (shift_state == 2)
-			app_flg = !app_flg;
-
-		    if (app_flg)
-			p += sprintf((char *) p, "\x1BO%c", xkey);
-		    else
-			p += sprintf((char *) p, "\x1B[%c", xkey);
-		}
+		p += format_arrow_key(p, term, xkey, shift_state);
 		return p - output;
 	    }
 	}
@@ -4872,16 +4852,6 @@ static int TranslateKey(UINT message, WPARAM wParam, LPARAM lParam,
 	return 0;
 
     return -1;
-}
-
-void request_paste(void *frontend)
-{
-    /*
-     * In Windows, pasting is synchronous: we can read the
-     * clipboard with no difficulty, so request_paste() can just go
-     * ahead and paste.
-     */
-    term_do_paste(term);
 }
 
 void set_title(void *frontend, char *title)
@@ -5363,46 +5333,89 @@ void write_clip(void *frontend, wchar_t * data, int *attr, int len, int must_des
 	SendMessage(hwnd, WM_IGNORE_CLIP, FALSE, 0);
 }
 
-void get_clip(void *frontend, wchar_t ** p, int *len)
+static DWORD WINAPI clipboard_read_threadfunc(void *param)
 {
-    static HGLOBAL clipdata = NULL;
-    static wchar_t *converted = 0;
-    wchar_t *p2;
+    HWND hwnd = (HWND)param;
+    HGLOBAL clipdata;
 
-    if (converted) {
-	sfree(converted);
-	converted = 0;
-    }
-    if (!p) {
-	if (clipdata)
-	    GlobalUnlock(clipdata);
-	clipdata = NULL;
-	return;
-    } else if (OpenClipboard(NULL)) {
+    if (OpenClipboard(NULL)) {
 	if ((clipdata = GetClipboardData(CF_UNICODETEXT))) {
-	    CloseClipboard();
-	    *p = GlobalLock(clipdata);
-	    if (*p) {
-		for (p2 = *p; *p2; p2++);
-		*len = p2 - *p;
-		return;
-	    }
-	} else if ( (clipdata = GetClipboardData(CF_TEXT)) ) {
-	    char *s;
-	    int i;
-	    CloseClipboard();
-	    s = GlobalLock(clipdata);
-	    i = MultiByteToWideChar(CP_ACP, 0, s, strlen(s) + 1, 0, 0);
-	    *p = converted = snewn(i, wchar_t);
-	    MultiByteToWideChar(CP_ACP, 0, s, strlen(s) + 1, converted, i);
-	    *len = i - 1;
-	    return;
-	} else
-	    CloseClipboard();
+	    SendMessage(hwnd, WM_GOT_CLIPDATA, (WPARAM)1, (LPARAM)clipdata);
+	} else if ((clipdata = GetClipboardData(CF_TEXT))) {
+	    SendMessage(hwnd, WM_GOT_CLIPDATA, (WPARAM)0, (LPARAM)clipdata);
+	}
+	CloseClipboard();
     }
 
-    *p = NULL;
-    *len = 0;
+    return 0;
+}
+
+static int process_clipdata(HGLOBAL clipdata, int unicode)
+{
+    sfree(clipboard_contents);
+    clipboard_contents = NULL;
+    clipboard_length = 0;
+
+    if (unicode) {
+	wchar_t *p = GlobalLock(clipdata);
+	wchar_t *p2;
+
+	if (p) {
+	    /* Unwilling to rely on Windows having wcslen() */
+	    for (p2 = p; *p2; p2++);
+	    clipboard_length = p2 - p;
+	    clipboard_contents = snewn(clipboard_length + 1, wchar_t);
+	    memcpy(clipboard_contents, p, clipboard_length * sizeof(wchar_t));
+	    clipboard_contents[clipboard_length] = L'\0';
+	    return TRUE;
+	}
+    } else {
+	char *s = GlobalLock(clipdata);
+	int i;
+
+	if (s) {
+	    i = MultiByteToWideChar(CP_ACP, 0, s, strlen(s) + 1, 0, 0);
+	    clipboard_contents = snewn(i, wchar_t);
+	    MultiByteToWideChar(CP_ACP, 0, s, strlen(s) + 1,
+				clipboard_contents, i);
+	    clipboard_length = i - 1;
+	    clipboard_contents[clipboard_length] = L'\0';
+	    return TRUE;
+	}
+    }
+
+    return FALSE;
+}
+
+void request_paste(void *frontend)
+{
+    /*
+     * I always thought pasting was synchronous in Windows; the
+     * clipboard access functions certainly _look_ synchronous,
+     * unlike the X ones. But in fact it seems that in some
+     * situations the contents of the clipboard might not be
+     * immediately available, and the clipboard-reading functions
+     * may block. This leads to trouble if the application
+     * delivering the clipboard data has to get hold of it by -
+     * for example - talking over a network connection which is
+     * forwarded through this very PuTTY.
+     *
+     * Hence, we spawn a subthread to read the clipboard, and do
+     * our paste when it's finished. The thread will send a
+     * message back to our main window when it terminates, and
+     * that tells us it's OK to paste.
+     */
+    DWORD in_threadid; /* required for Win9x */
+    CreateThread(NULL, 0, clipboard_read_threadfunc,
+		 hwnd, 0, &in_threadid);
+}
+
+void get_clip(void *frontend, wchar_t **p, int *len)
+{
+    if (p) {
+	*p = clipboard_contents;
+	*len = clipboard_length;
+    }
 }
 
 #if 0
@@ -5461,16 +5474,12 @@ void modalfatalbox(char *fmt, ...)
     cleanup_exit(1);
 }
 
-typedef BOOL (WINAPI *p_FlashWindowEx_t)(PFLASHWINFO);
-static p_FlashWindowEx_t p_FlashWindowEx = NULL;
+DECL_WINDOWS_FUNCTION(static, BOOL, FlashWindowEx, (PFLASHWINFO));
 
 static void init_flashwindow(void)
 {
-    HMODULE user32_module = LoadLibrary("USER32.DLL");
-    if (user32_module) {
-	p_FlashWindowEx = (p_FlashWindowEx_t)
-	    GetProcAddress(user32_module, "FlashWindowEx");
-    }
+    HMODULE user32_module = load_system32_dll("user32.dll");
+    GET_WINDOWS_FUNCTION(user32_module, FlashWindowEx);
 }
 
 static BOOL flash_window_ex(DWORD dwFlags, UINT uCount, DWORD dwTimeout)
@@ -5819,9 +5828,12 @@ static void make_full_screen()
 
     reset_window(0);
 
-    /* Tick the menu item in the System menu. */
-    CheckMenuItem(GetSystemMenu(hwnd, FALSE), IDM_FULLSCREEN,
-		  MF_CHECKED);
+    /* Tick the menu item in the System and context menus. */
+    {
+	int i;
+	for (i = 0; i < lenof(popup_menus); i++)
+	    CheckMenuItem(popup_menus[i].menu, IDM_FULLSCREEN, MF_CHECKED);
+    }
 }
 
 /*
@@ -5849,9 +5861,12 @@ static void clear_full_screen()
 		     SWP_FRAMECHANGED);
     }
 
-    /* Untick the menu item in the System menu. */
-    CheckMenuItem(GetSystemMenu(hwnd, FALSE), IDM_FULLSCREEN,
-		  MF_UNCHECKED);
+    /* Untick the menu item in the System and context menus. */
+    {
+	int i;
+	for (i = 0; i < lenof(popup_menus); i++)
+	    CheckMenuItem(popup_menus[i].menu, IDM_FULLSCREEN, MF_UNCHECKED);
+    }
 }
 
 /*
